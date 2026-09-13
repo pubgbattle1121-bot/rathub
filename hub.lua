@@ -1,27 +1,38 @@
 --[[
-    Onyx Hub v1
-    - UI with intro animation
-    - Main tab: ESP + Aimbot
-    - Misc tab: reserved
-    - Settings tab: UI toggle, cursor free, shutdown key (;)
+    Onyx Hub v1.1
+    - ESP fixed
+    - Aimbot: Mouse Follow / Center Lock modes
+    - Rival Script intro
+    - UI toggle: RightShift
+    - Shutdown: ;
 ]]
 
 --============ SERVICES ============--
-local Players           = game:GetService("Players")
-local RunService        = game:GetService("RunService")
-local UserInputService  = game:GetService("UserInputService")
-local TweenService      = game:GetService("TweenService")
-local CoreGui           = game:GetService("CoreGui")
-local Workspace         = game:GetService("Workspace")
-local Lighting          = game:GetService("Lighting")
+local Players          = game:GetService("Players")
+local RunService       = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local TweenService     = game:GetService("TweenService")
+local CoreGui          = game:GetService("CoreGui")
+local Workspace        = game:GetService("Workspace")
 
 local LocalPlayer = Players.LocalPlayer
 local Camera      = Workspace.CurrentCamera
 
+--============ DRAWING CHECK ============--
+local HAS_DRAWING = pcall(function()
+    local d = Drawing.new("Square")
+    d:Remove()
+end)
+
+if not HAS_DRAWING then
+    warn("[Onyx Hub] 이 executor는 Drawing을 지원하지 않음. ESP 비활성.")
+end
+
 --============ CONFIG ============--
 local CONFIG = {
-    UI_TOGGLE_KEY   = Enum.KeyCode.RightShift,
-    SHUTDOWN_KEY    = Enum.KeyCode.Semicolon, -- ;
+    UI_TOGGLE_KEY = Enum.KeyCode.RightShift,
+    SHUTDOWN_KEY  = Enum.KeyCode.Semicolon,
+
     ESP = {
         Enabled     = false,
         Box         = true,
@@ -32,16 +43,20 @@ local CONFIG = {
         TeamCheck   = true,
         MaxDistance = 1000,
     },
+
     AIM = {
         Enabled     = false,
+        Mode        = "Mouse",   -- "Mouse" | "Center"
         FOV         = 120,
         Smoothness  = 5,
-        Radius      = 100,
         TargetPart  = "Head",
         TeamCheck   = true,
         VisibleOnly = false,
         ShowFOV     = true,
+        MouseOffsetX = 0,        -- 마우스 모드에서 커서 위치 보정
+        MouseOffsetY = 0,
     },
+
     Misc = {
         CursorFree = false,
     },
@@ -49,9 +64,10 @@ local CONFIG = {
 
 --============ STATE ============--
 local Connections = {}
-local ESPCache    = {}   -- [player] = {drawings...}
+local ESPCache    = {}
 local FOVCircle   = nil
 local Running     = true
+local CurrentAimTarget = nil
 
 local function track(c)
     table.insert(Connections, c)
@@ -61,36 +77,48 @@ end
 --============ CLEANUP ============--
 local function cleanup()
     Running = false
-
     for _, c in ipairs(Connections) do
         pcall(function() c:Disconnect() end)
     end
     Connections = {}
-
     for _, data in pairs(ESPCache) do
         for _, d in pairs(data) do
             pcall(function() d:Remove() end)
         end
     end
     ESPCache = {}
-
     if FOVCircle then
         pcall(function() FOVCircle:Remove() end)
         FOVCircle = nil
     end
-
     pcall(function() UserInputService.MouseIconEnabled = true end)
-    pcall(function() LocalPlayer.CameraMode = Enum.CameraMode.Classic end)
 end
 
---============ DRAWING HELPERS ============--
+--============ DRAWING HELPER ============--
 local function newDrawing(class, props)
+    if not HAS_DRAWING then return nil end
     local ok, d = pcall(function() return Drawing.new(class) end)
     if not ok or not d then return nil end
     for k, v in pairs(props or {}) do
         pcall(function() d[k] = v end)
     end
     return d
+end
+
+--============ TEAM HELPER ============--
+local function isEnemy(player)
+    if player == LocalPlayer then return false end
+    if not CONFIG.ESP.TeamCheck and not CONFIG.AIM.TeamCheck then return true end
+
+    local myTeam    = LocalPlayer.Team
+    local theirTeam = player.Team
+
+    -- FFA 서버 (양쪽 다 nil) → 모두 적
+    if myTeam == nil and theirTeam == nil then return true end
+    -- 한쪽만 nil → 팀 정보 없으니 적으로 처리 X (안전)
+    if myTeam == nil or theirTeam == nil then return false end
+    -- 둘 다 있으면 비교
+    return myTeam ~= theirTeam
 end
 
 --============ ESP ============--
@@ -108,30 +136,32 @@ local function createESP(player)
     clearESP(player)
 
     ESPCache[player] = {
-        box       = newDrawing("Square",   { Thickness = 1, Filled = false, Color = Color3.fromRGB(255, 255, 255), Transparency = 1 }),
-        boxFill   = newDrawing("Square",   { Thickness = 1, Filled = true,  Color = Color3.fromRGB(0, 0, 0), Transparency = 0.6 }),
-        name      = newDrawing("Text",     { Size = 14, Center = true, Outline = true, Color = Color3.fromRGB(255, 255, 255), Transparency = 1, Font = 2 }),
-        distance  = newDrawing("Text",     { Size = 12, Center = true, Outline = true, Color = Color3.fromRGB(200, 200, 200), Transparency = 1, Font = 2 }),
-        healthBg  = newDrawing("Line",     { Thickness = 3, Color = Color3.fromRGB(40, 40, 40), Transparency = 1 }),
-        healthBar = newDrawing("Line",     { Thickness = 3, Color = Color3.fromRGB(0, 255, 120), Transparency = 1 }),
-        tracer    = newDrawing("Line",     { Thickness = 1, Color = Color3.fromRGB(255, 255, 255), Transparency = 1 }),
+        box       = newDrawing("Square", { Thickness = 1, Filled = false, Color = Color3.fromRGB(255, 255, 255), Transparency = 1 }),
+        boxFill   = newDrawing("Square", { Thickness = 1, Filled = true,  Color = Color3.fromRGB(0, 0, 0), Transparency = 0.55 }),
+        name      = newDrawing("Text",   { Size = 14, Center = true, Outline = true, Color = Color3.fromRGB(255, 255, 255), Transparency = 1, Font = 2 }),
+        distance  = newDrawing("Text",   { Size = 12, Center = true, Outline = true, Color = Color3.fromRGB(200, 200, 200), Transparency = 1, Font = 2 }),
+        healthBg  = newDrawing("Line",   { Thickness = 3, Color = Color3.fromRGB(40, 40, 40), Transparency = 1 }),
+        healthBar = newDrawing("Line",   { Thickness = 3, Color = Color3.fromRGB(0, 255, 120), Transparency = 1 }),
+        tracer    = newDrawing("Line",   { Thickness = 1, Color = Color3.fromRGB(255, 255, 255), Transparency = 0.7 }),
     }
 end
 
-local function isSameTeam(player)
-    if not CONFIG.ESP.TeamCheck then return false end
-    return player.Team == LocalPlayer.Team
-end
-
 local function updateESP()
-    if not CONFIG.ESP.Enabled then
+    if not CONFIG.ESP.Enabled or not HAS_DRAWING then
         for p in pairs(ESPCache) do clearESP(p) end
         return
     end
 
+    local viewportSize = Camera.ViewportSize
+
     for _, player in ipairs(Players:GetPlayers()) do
         if player == LocalPlayer then continue end
-        if isSameTeam(player) then clearESP(player) continue end
+
+        -- 팀 체크 (ESP 기준)
+        if CONFIG.ESP.TeamCheck and not isEnemy(player) then
+            clearESP(player)
+            continue
+        end
 
         local char = player.Character
         local hrp  = char and char:FindFirstChild("HumanoidRootPart")
@@ -143,73 +173,86 @@ local function updateESP()
             continue
         end
 
-        if not ESPCache[player] then createESP(player) end
-        local d = ESPCache[player]
-        if not d then continue end
-
         local distance = (Camera.CFrame.Position - hrp.Position).Magnitude
         if distance > CONFIG.ESP.MaxDistance then
-            for _, obj in pairs(d) do obj.Visible = false end
+            if ESPCache[player] then
+                for _, obj in pairs(ESPCache[player]) do obj.Visible = false end
+            end
             continue
         end
 
-        local headPos, headOnScreen = Camera:WorldToViewportPoint(head.Position)
-        local rootPos, rootOnScreen = Camera:WorldToViewportPoint(hrp.Position)
+        if not ESPCache[player] then createESP(player) end
+        local d = ESPCache[player]
+        if not d or not d.box then continue end
+
+        -- head 위쪽, hrp 아래쪽 기준으로 박스
+        local headPos, headOnScreen = Camera:WorldToViewportPoint(head.Position + Vector3.new(0, 0.5, 0))
+        local rootPos, rootOnScreen = Camera:WorldToViewportPoint(hrp.Position - Vector3.new(0, 3, 0))
+
+        -- Z < 0 → 카메라 뒤
+        if headPos.Z < 0 and rootPos.Z < 0 then
+            for _, obj in pairs(d) do obj.Visible = false end
+            continue
+        end
 
         if not headOnScreen and not rootOnScreen then
             for _, obj in pairs(d) do obj.Visible = false end
             continue
         end
 
-        local height = math.abs(headPos.Y - rootPos.Y) * 2
-        local width  = height / 2
-        local size   = Vector2.new(width, height)
-        local pos    = Vector2.new(headPos.X - width / 2, headPos.Y - height / 4)
+        local topY    = math.min(headPos.Y, rootPos.Y)
+        local bottomY = math.max(headPos.Y, rootPos.Y)
+        local height  = math.abs(bottomY - topY)
+        local width   = height * 0.55
+        local centerX = (headPos.X + rootPos.X) / 2
 
-        -- Box
-        d.box.Visible     = CONFIG.ESP.Box
-        d.boxFill.Visible = CONFIG.ESP.Box
+        local posX = centerX - width / 2
+        local posY = topY
+
+        -- 박스 (Square는 좌상단 기준)
+        d.box.Visible      = CONFIG.ESP.Box
+        d.boxFill.Visible  = CONFIG.ESP.Box
         if CONFIG.ESP.Box then
-            d.box.Size        = size
-            d.box.Position    = pos
-            d.boxFill.Size    = size
-            d.boxFill.Position = pos
-            d.box.Color       = Color3.fromRGB(255, 255, 255)
-            d.boxFill.Color   = Color3.fromRGB(0, 0, 0)
+            d.box.Size         = Vector2.new(width, height)
+            d.box.Position     = Vector2.new(posX, posY)
+            d.boxFill.Size     = Vector2.new(width, height)
+            d.boxFill.Position = Vector2.new(posX, posY)
+            d.box.Color        = Color3.fromRGB(255, 255, 255)
+            d.boxFill.Color    = Color3.fromRGB(0, 0, 0)
         end
 
-        -- Name
-        d.name.Visible  = CONFIG.ESP.Name
+        -- 이름
+        d.name.Visible = CONFIG.ESP.Name
         if CONFIG.ESP.Name then
             d.name.Text     = player.Name
-            d.name.Position = Vector2.new(headPos.X, pos.Y - 16)
+            d.name.Position = Vector2.new(centerX, posY - 16)
         end
 
-        -- Distance
+        -- 거리
         d.distance.Visible = CONFIG.ESP.Distance
         if CONFIG.ESP.Distance then
-            d.distance.Text     = string.format("[%d studs]", math.floor(distance))
-            d.distance.Position = Vector2.new(headPos.X, pos.Y + height + 4)
+            d.distance.Text     = string.format("[%d]", math.floor(distance))
+            d.distance.Position = Vector2.new(centerX, posY + height + 4)
         end
 
-        -- Health bar
-        local healthPct = math.clamp(hum.Health / hum.MaxHealth, 0, 1)
+        -- 체력바
+        local healthPct = math.clamp(hum.Health / math.max(hum.MaxHealth, 1), 0, 1)
         d.healthBg.Visible  = CONFIG.ESP.Health
         d.healthBar.Visible = CONFIG.ESP.Health
         if CONFIG.ESP.Health then
-            local barX = pos.X - 6
-            d.healthBg.From      = Vector2.new(barX, pos.Y)
-            d.healthBg.To        = Vector2.new(barX, pos.Y + height)
-            d.healthBar.From     = Vector2.new(barX, pos.Y + height * (1 - healthPct))
-            d.healthBar.To       = Vector2.new(barX, pos.Y + height)
-            d.healthBar.Color    = Color3.fromRGB(255 * (1 - healthPct), 255 * healthPct, 60)
+            local barX = posX - 6
+            d.healthBg.From  = Vector2.new(barX, posY)
+            d.healthBg.To    = Vector2.new(barX, posY + height)
+            d.healthBar.From = Vector2.new(barX, posY + height * (1 - healthPct))
+            d.healthBar.To   = Vector2.new(barX, posY + height)
+            d.healthBar.Color = Color3.fromRGB(255 * (1 - healthPct), 255 * healthPct, 60)
         end
 
-        -- Tracer
+        -- 트레이서 (화면 하단 중앙 → 박스 하단 중앙)
         d.tracer.Visible = CONFIG.ESP.Tracer
         if CONFIG.ESP.Tracer then
-            d.tracer.From = Vector2.new(Camera.ViewportSize.X / 2, Camera.ViewportSize.Y)
-            d.tracer.To   = Vector2.new(headPos.X, pos.Y + height)
+            d.tracer.From = Vector2.new(viewportSize.X / 2, viewportSize.Y)
+            d.tracer.To   = Vector2.new(centerX, posY + height)
         end
     end
 end
@@ -217,11 +260,19 @@ end
 --============ AIMBOT ============--
 local function getClosestTarget()
     local closest, closestDist = nil, math.huge
-    local mousePos = UserInputService:GetMouseLocation()
+
+    -- 마우스 모드는 커서 위치 기준, 센터 모드는 화면 중앙 기준
+    local refPos
+    if CONFIG.AIM.Mode == "Mouse" then
+        local m = UserInputService:GetMouseLocation()
+        refPos = Vector2.new(m.X + CONFIG.AIM.MouseOffsetX, m.Y + CONFIG.AIM.MouseOffsetY)
+    else
+        refPos = Vector2.new(Camera.ViewportSize.X / 2, Camera.ViewportSize.Y / 2)
+    end
 
     for _, player in ipairs(Players:GetPlayers()) do
         if player == LocalPlayer then continue end
-        if CONFIG.AIM.TeamCheck and player.Team == LocalPlayer.Team then continue end
+        if CONFIG.AIM.TeamCheck and not isEnemy(player) then continue end
 
         local char = player.Character
         local hum  = char and char:FindFirstChildOfClass("Humanoid")
@@ -231,20 +282,24 @@ local function getClosestTarget()
         if not part then continue end
 
         local screenPos, onScreen = Camera:WorldToViewportPoint(part.Position)
-        if not onScreen then continue end
+        if not onScreen or screenPos.Z < 0 then continue end
 
-        local dist = (Vector2.new(screenPos.X, screenPos.Y) - mousePos).Magnitude
+        local dist = (Vector2.new(screenPos.X, screenPos.Y) - refPos).Magnitude
         if dist > CONFIG.AIM.FOV then continue end
 
         if CONFIG.AIM.VisibleOnly then
-            local ray = Ray.new(Camera.CFrame.Position, part.Position - Camera.CFrame.Position)
-            local hit = Workspace:FindPartOnRayWithIgnoreList(ray, { LocalPlayer.Character, Camera })
+            local origin = Camera.CFrame.Position
+            local dir    = (part.Position - origin)
+            local ray    = Ray.new(origin, dir)
+
+            local ignoreList = { LocalPlayer.Character, Camera }
+            local hit = Workspace:FindPartOnRayWithIgnoreList(ray, ignoreList)
             if hit and not hit:IsDescendantOf(char) then continue end
         end
 
         if dist < closestDist then
             closestDist = dist
-            closest = part
+            closest     = part
         end
     end
 
@@ -252,9 +307,13 @@ local function getClosestTarget()
 end
 
 local function updateAimbot()
-    if not CONFIG.AIM.Enabled then return end
+    if not CONFIG.AIM.Enabled then
+        CurrentAimTarget = nil
+        return
+    end
 
     local target = getClosestTarget()
+    CurrentAimTarget = target
     if not target then return end
 
     local targetPos = target.Position
@@ -268,33 +327,28 @@ end
 
 --============ FOV CIRCLE ============--
 local function updateFOV()
-    if not CONFIG.AIM.ShowFOV or not CONFIG.AIM.Enabled then
+    if not HAS_DRAWING then return end
+
+    if not (CONFIG.AIM.Enabled and CONFIG.AIM.ShowFOV) then
         if FOVCircle then FOVCircle.Visible = false end
         return
     end
 
     if not FOVCircle then
         FOVCircle = newDrawing("Circle", {
-            Thickness   = 1,
-            NumSides    = 64,
-            Filled      = false,
-            Color       = Color3.fromRGB(255, 255, 255),
-            Transparency = 0.5,
+            Thickness    = 1,
+            NumSides     = 64,
+            Filled       = false,
+            Color        = Color3.fromRGB(255, 255, 255),
+            Transparency = 0.6,
         })
     end
 
-    FOVCircle.Visible  = true
-    FOVCircle.Position = UserInputService:GetMouseLocation()
-    FOVCircle.Radius   = CONFIG.AIM.FOV
-end
-
---============ CURSOR FREE ============--
-local function applyCursorFree()
-    if CONFIG.Misc.CursorFree then
-        UserInputService.MouseIconEnabled = true
-    else
-        UserInputService.MouseIconEnabled = true -- roblox default, always on
-    end
+    FOVCircle.Visible = true
+    FOVCircle.Radius  = CONFIG.AIM.FOV
+    FOVCircle.Position = CONFIG.AIM.Mode == "Mouse"
+        and UserInputService:GetMouseLocation()
+        or Vector2.new(Camera.ViewportSize.X / 2, Camera.ViewportSize.Y / 2)
 end
 
 --============ MAIN LOOP ============--
@@ -321,14 +375,14 @@ pcall(function()
     end
 end)
 
---============ INTRO (RIVAL SCRIPT) ============--
+--============ INTRO ============--
 local Intro = Instance.new("Frame")
-Intro.Name = "Intro"
 Intro.Size = UDim2.fromScale(1, 1)
 Intro.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
 Intro.BackgroundTransparency = 1
 Intro.BorderSizePixel = 0
 Intro.ZIndex = 100
+Intro.Visible = false
 Intro.Parent = ScreenGui
 
 local IntroText = Instance.new("TextLabel")
@@ -356,6 +410,7 @@ IntroSub.ZIndex = 101
 IntroSub.Parent = Intro
 
 local function playIntro()
+    Intro.Visible = true
     Intro.BackgroundTransparency = 1
     IntroText.TextTransparency = 1
     IntroSub.TextTransparency = 1
@@ -369,7 +424,6 @@ local function playIntro()
     TweenService:Create(IntroSub, TweenInfo.new(0.4), { TextTransparency = 0, Position = UDim2.fromScale(0, 0.62) }):Play()
     task.wait(1.2)
 
-    -- fade out
     TweenService:Create(IntroText, TweenInfo.new(0.4), { TextTransparency = 1 }):Play()
     TweenService:Create(IntroSub, TweenInfo.new(0.4), { TextTransparency = 1 }):Play()
     TweenService:Create(Intro, TweenInfo.new(0.6), { BackgroundTransparency = 1 }):Play()
@@ -379,8 +433,7 @@ end
 
 --============ MAIN UI ============--
 local Main = Instance.new("Frame")
-Main.Name = "Main"
-Main.Size = UDim2.fromOffset(560, 360)
+Main.Size = UDim2.fromOffset(600, 400)
 Main.Position = UDim2.fromScale(0.5, 0.5)
 Main.AnchorPoint = Vector2.new(0.5, 0.5)
 Main.BackgroundColor3 = Color3.fromRGB(20, 20, 24)
@@ -389,9 +442,7 @@ Main.Visible = false
 Main.ZIndex = 10
 Main.Parent = ScreenGui
 
-local MainCorner = Instance.new("UICorner")
-MainCorner.CornerRadius = UDim.new(0, 8)
-MainCorner.Parent = Main
+Instance.new("UICorner", Main).CornerRadius = UDim.new(0, 8)
 
 local MainStroke = Instance.new("UIStroke")
 MainStroke.Color = Color3.fromRGB(60, 60, 70)
@@ -406,12 +457,10 @@ TitleBar.BorderSizePixel = 0
 TitleBar.ZIndex = 11
 TitleBar.Parent = Main
 
-local TitleCorner = Instance.new("UICorner")
-TitleCorner.CornerRadius = UDim.new(0, 8)
-TitleCorner.Parent = TitleBar
+Instance.new("UICorner", TitleBar).CornerRadius = UDim.new(0, 8)
 
 local TitleText = Instance.new("TextLabel")
-TitleText.Size = UDim2.new(1, -80, 1, 0)
+TitleText.Size = UDim2.new(1, -200, 1, 0)
 TitleText.Position = UDim2.fromOffset(12, 0)
 TitleText.BackgroundTransparency = 1
 TitleText.Text = "Onyx Hub"
@@ -422,7 +471,7 @@ TitleText.TextSize = 14
 TitleText.ZIndex = 12
 TitleText.Parent = TitleBar
 
--- Rival Script button (top of UI)
+-- Rival Script button
 local RivalBtn = Instance.new("TextButton")
 RivalBtn.Size = UDim2.fromOffset(110, 24)
 RivalBtn.Position = UDim2.new(1, -120, 0, 6)
@@ -435,9 +484,7 @@ RivalBtn.TextSize = 12
 RivalBtn.ZIndex = 12
 RivalBtn.Parent = TitleBar
 
-local RivalCorner = Instance.new("UICorner")
-RivalCorner.CornerRadius = UDim.new(0, 4)
-RivalCorner.Parent = RivalBtn
+Instance.new("UICorner", RivalBtn).CornerRadius = UDim.new(0, 4)
 
 -- Tab bar
 local TabBar = Instance.new("Frame")
@@ -455,8 +502,7 @@ Content.BackgroundTransparency = 1
 Content.ZIndex = 11
 Content.Parent = Main
 
-local Pages = {}
-local Tabs = {}
+local Pages, Tabs = {}, {}
 
 local function createPage(name)
     local page = Instance.new("ScrollingFrame")
@@ -500,21 +546,18 @@ local function createTab(name)
     btn.ZIndex = 12
     btn.Parent = TabBar
 
-    local c = Instance.new("UICorner")
-    c.CornerRadius = UDim.new(0, 4)
-    c.Parent = btn
+    Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 4)
 
     local pad = Instance.new("UIPadding")
     pad.PaddingLeft = UDim.new(0, 10)
     pad.Parent = btn
 
     local page = createPage(name)
-
     table.insert(Tabs, { btn = btn, page = page })
     Pages[name] = page
 
     btn.MouseButton1Click:Connect(function()
-        for n, tab in pairs(Tabs) do
+        for _, tab in ipairs(Tabs) do
             tab.page.Visible = false
             tab.btn.BackgroundColor3 = Color3.fromRGB(24, 24, 28)
             tab.btn.TextColor3 = Color3.fromRGB(180, 180, 190)
@@ -544,7 +587,7 @@ end
 
 local function addSection(parent, text)
     local l = Instance.new("TextLabel")
-    l.Size = UDim2.new(1, 0, 0, 24)
+    l.Size = UDim2.new(1, 0, 0, 26)
     l.BackgroundTransparency = 1
     l.Text = text
     l.TextColor3 = Color3.fromRGB(255, 255, 255)
@@ -563,10 +606,7 @@ local function addToggle(parent, text, default, callback)
     row.BorderSizePixel = 0
     row.ZIndex = 12
     row.Parent = parent
-
-    local rc = Instance.new("UICorner")
-    rc.CornerRadius = UDim.new(0, 4)
-    rc.Parent = row
+    Instance.new("UICorner", row).CornerRadius = UDim.new(0, 4)
 
     local lbl = Instance.new("TextLabel")
     lbl.Size = UDim2.new(1, -60, 1, 0)
@@ -593,10 +633,7 @@ local function addToggle(parent, text, default, callback)
     box.TextSize = 10
     box.ZIndex = 13
     box.Parent = row
-
-    local bc = Instance.new("UICorner")
-    bc.CornerRadius = UDim.new(0, 10)
-    bc.Parent = box
+    Instance.new("UICorner", box).CornerRadius = UDim.new(0, 10)
 
     box.MouseButton1Click:Connect(function()
         state = not state
@@ -615,10 +652,7 @@ local function addSlider(parent, text, minV, maxV, default, callback)
     row.BorderSizePixel = 0
     row.ZIndex = 12
     row.Parent = parent
-
-    local rc = Instance.new("UICorner")
-    rc.CornerRadius = UDim.new(0, 4)
-    rc.Parent = row
+    Instance.new("UICorner", row).CornerRadius = UDim.new(0, 4)
 
     local lbl = Instance.new("TextLabel")
     lbl.Size = UDim2.new(1, -20, 0, 18)
@@ -639,10 +673,7 @@ local function addSlider(parent, text, minV, maxV, default, callback)
     bar.BorderSizePixel = 0
     bar.ZIndex = 13
     bar.Parent = row
-
-    local bc = Instance.new("UICorner")
-    bc.CornerRadius = UDim.new(0, 3)
-    bc.Parent = bar
+    Instance.new("UICorner", bar).CornerRadius = UDim.new(0, 3)
 
     local fill = Instance.new("Frame")
     fill.Size = UDim2.new((default - minV) / (maxV - minV), 0, 1, 0)
@@ -650,10 +681,7 @@ local function addSlider(parent, text, minV, maxV, default, callback)
     fill.BorderSizePixel = 0
     fill.ZIndex = 14
     fill.Parent = bar
-
-    local fc = Instance.new("UICorner")
-    fc.CornerRadius = UDim.new(0, 3)
-    fc.Parent = fill
+    Instance.new("UICorner", fill).CornerRadius = UDim.new(0, 3)
 
     local dragging = false
 
@@ -666,39 +694,84 @@ local function addSlider(parent, text, minV, maxV, default, callback)
         if callback then pcall(callback, val) end
     end
 
-    local dragCon = UserInputService.InputChanged:Connect(function(input)
+    track(UserInputService.InputChanged:Connect(function(input)
         if dragging and input.UserInputType == Enum.UserInputType.MouseMovement then
             setFromX(input.Position.X)
         end
-    end)
-    track(dragCon)
+    end))
 
-    local beginCon = bar.InputBegan:Connect(function(input)
+    track(bar.InputBegan:Connect(function(input)
         if input.UserInputType == Enum.UserInputType.MouseButton1 then
             dragging = true
             setFromX(input.Position.X)
         end
-    end)
-    track(beginCon)
+    end))
 
-    local endCon = UserInputService.InputEnded:Connect(function(input)
+    track(UserInputService.InputEnded:Connect(function(input)
         if input.UserInputType == Enum.UserInputType.MouseButton1 then
             dragging = false
         end
+    end))
+
+    return row
+end
+
+-- Dropdown (모드 선택용)
+local function addDropdown(parent, text, options, default, callback)
+    local row = Instance.new("Frame")
+    row.Size = UDim2.new(1, 0, 0, 30)
+    row.BackgroundColor3 = Color3.fromRGB(28, 28, 34)
+    row.BorderSizePixel = 0
+    row.ZIndex = 12
+    row.Parent = parent
+    Instance.new("UICorner", row).CornerRadius = UDim.new(0, 4)
+
+    local lbl = Instance.new("TextLabel")
+    lbl.Size = UDim2.new(1, -140, 1, 0)
+    lbl.Position = UDim2.fromOffset(10, 0)
+    lbl.BackgroundTransparency = 1
+    lbl.Text = text
+    lbl.TextColor3 = Color3.fromRGB(220, 220, 230)
+    lbl.Font = Enum.Font.Gotham
+    lbl.TextSize = 12
+    lbl.TextXAlignment = Enum.TextXAlignment.Left
+    lbl.ZIndex = 13
+    lbl.Parent = row
+
+    local current = default or options[1]
+
+    local btn = Instance.new("TextButton")
+    btn.Size = UDim2.fromOffset(120, 22)
+    btn.Position = UDim2.new(1, -130, 0.5, -11)
+    btn.BackgroundColor3 = Color3.fromRGB(45, 45, 55)
+    btn.BorderSizePixel = 0
+    btn.Text = current
+    btn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    btn.Font = Enum.Font.Gotham
+    btn.TextSize = 11
+    btn.ZIndex = 13
+    btn.Parent = row
+    Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 4)
+
+    btn.MouseButton1Click:Connect(function()
+        local idx = table.find(options, current) or 1
+        idx = idx % #options + 1
+        current = options[idx]
+        btn.Text = current
+        if callback then pcall(callback, current) end
     end)
-    track(endCon)
 
     return row
 end
 
 --============ BUILD PAGES ============--
-local MainPage = createTab("Main")
-local MiscPage = createTab("Misc")
+local MainPage     = createTab("Main")
+local MiscPage     = createTab("Misc")
 local SettingsPage = createTab("Settings")
 
 -- ---- MAIN: ESP ----
 addSection(MainPage, "ESP")
-addToggle(MainPage, "ESP Enabled", CONFIG.ESP.Enabled, function(v) CONFIG.ESP.Enabled = v end)
+addToggle(MainPage, "ESP Enabled", CONFIG.ESP.Enabled,   function(v) CONFIG.ESP.Enabled = v end)
 addToggle(MainPage, "Box",        CONFIG.ESP.Box,        function(v) CONFIG.ESP.Box = v end)
 addToggle(MainPage, "Name",       CONFIG.ESP.Name,       function(v) CONFIG.ESP.Name = v end)
 addToggle(MainPage, "Distance",   CONFIG.ESP.Distance,   function(v) CONFIG.ESP.Distance = v end)
@@ -709,14 +782,13 @@ addSlider(MainPage, "Max Distance", 100, 5000, CONFIG.ESP.MaxDistance, function(
 
 -- ---- MAIN: AIMBOT ----
 addSection(MainPage, "Aimbot")
-addToggle(MainPage, "Aimbot Enabled", CONFIG.AIM.Enabled,   function(v) CONFIG.AIM.Enabled = v end)
-addToggle(MainPage, "Team Check",     CONFIG.AIM.TeamCheck, function(v) CONFIG.AIM.TeamCheck = v end)
+addToggle(MainPage, "Aimbot Enabled", CONFIG.AIM.Enabled,     function(v) CONFIG.AIM.Enabled = v end)
+addDropdown(MainPage, "Aim Mode", { "Mouse", "Center" }, CONFIG.AIM.Mode, function(v) CONFIG.AIM.Mode = v end)
+addToggle(MainPage, "Team Check",     CONFIG.AIM.TeamCheck,   function(v) CONFIG.AIM.TeamCheck = v end)
 addToggle(MainPage, "Visible Only",   CONFIG.AIM.VisibleOnly, function(v) CONFIG.AIM.VisibleOnly = v end)
-addToggle(MainPage, "Show FOV",       CONFIG.AIM.ShowFOV,   function(v) CONFIG.AIM.ShowFOV = v end)
+addToggle(MainPage, "Show FOV",       CONFIG.AIM.ShowFOV,     function(v) CONFIG.AIM.ShowFOV = v end)
 addSlider(MainPage, "FOV",         10, 800, CONFIG.AIM.FOV,        function(v) CONFIG.AIM.FOV = v end)
-addSlider(MainPage, "Radius",      10, 500, CONFIG.AIM.Radius,     function(v) CONFIG.AIM.Radius = v end)
 addSlider(MainPage, "Smoothness",  1,  20,  CONFIG.AIM.Smoothness, function(v) CONFIG.AIM.Smoothness = v end)
-addSlider(MainPage, "FOV Size",    10, 800, 120, function(v) CONFIG.AIM.FOV = v end)
 
 -- ---- MISC ----
 addSection(MiscPage, "Misc")
@@ -724,12 +796,10 @@ addLabel(MiscPage, "아직 기능 없음. 나중에 추가하면 여기 붙이�
 
 -- ---- SETTINGS ----
 addSection(SettingsPage, "UI")
-addToggle(SettingsPage, "UI Toggle Key (RightShift)", true, function(v)
-    -- key 자체는 항상 활성. 토글로 on/off 편의용.
-end)
+addLabel(SettingsPage, "UI 토글 키: RightShift")
 
 addSection(SettingsPage, "Cursor")
-addToggle(SettingsPage, "Cursor Free (라이벌 안 죽었을 때 커서 풀기)", false, function(v)
+addToggle(SettingsPage, "Cursor Free", false, function(v)
     CONFIG.Misc.CursorFree = v
     if v then
         UserInputService.MouseIconEnabled = true
@@ -746,9 +816,9 @@ do
 
     TitleBar.InputBegan:Connect(function(input)
         if input.UserInputType == Enum.UserInputType.MouseButton1 then
-            dragging = true
+            dragging  = true
             dragStart = input.Position
-            startPos = Main.Position
+            startPos  = Main.Position
         end
     end)
 
@@ -772,42 +842,41 @@ end
 --============ RIVAL BUTTON ============--
 RivalBtn.MouseButton1Click:Connect(function()
     Main.Visible = false
-    Intro.Visible = true
-    playIntro()
-    task.wait(2.5)  -- 2~3초 대기
-    Main.Visible = true
-    Pages["Main"].Visible = true
-    for _, tab in ipairs(Tabs) do
-        tab.btn.BackgroundColor3 = Color3.fromRGB(24, 24, 28)
-        tab.btn.TextColor3 = Color3.fromRGB(180, 180, 190)
-    end
-    Tabs[1].btn.BackgroundColor3 = Color3.fromRGB(40, 40, 48)
-    Tabs[1].btn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    task.spawn(function()
+        playIntro()
+    end)
+    task.delay(2.5, function()
+        Main.Visible = true
+        for _, tab in ipairs(Tabs) do
+            tab.page.Visible = false
+            tab.btn.BackgroundColor3 = Color3.fromRGB(24, 24, 28)
+            tab.btn.TextColor3 = Color3.fromRGB(180, 180, 190)
+        end
+        Pages["Main"].Visible = true
+        Tabs[1].btn.BackgroundColor3 = Color3.fromRGB(40, 40, 48)
+        Tabs[1].btn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    end)
 end)
 
 --============ KEYBINDS ============--
 track(UserInputService.InputBegan:Connect(function(input, gpe)
     if gpe then return end
-
     if input.KeyCode == CONFIG.UI_TOGGLE_KEY then
         Main.Visible = not Main.Visible
     elseif input.KeyCode == CONFIG.SHUTDOWN_KEY then
         cleanup()
-        if ScreenGui then
-            pcall(function() ScreenGui:Destroy() end)
-        end
+        if ScreenGui then pcall(function() ScreenGui:Destroy() end) end
     end
 end))
 
 --============ FIRST OPEN ============--
--- 처음 실행하면 인트로 재생 후 메뉴 띄움
 Main.Visible = false
-Intro.Visible = true
-playIntro()
-task.wait(2.5)
-Main.Visible = true
-Pages["Main"].Visible = true
-Tabs[1].btn.BackgroundColor3 = Color3.fromRGB(40, 40, 48)
-Tabs[1].btn.TextColor3 = Color3.fromRGB(255, 255, 255)
+task.spawn(function()
+    playIntro()
+    Main.Visible = true
+    Pages["Main"].Visible = true
+    Tabs[1].btn.BackgroundColor3 = Color3.fromRGB(40, 40, 48)
+    Tabs[1].btn.TextColor3 = Color3.fromRGB(255, 255, 255)
+end)
 
-print("[Onyx Hub] loaded. UI toggle: RightShift | Shutdown: ;")
+print("[Onyx Hub] loaded | UI: RightShift | Shutdown: ;")
