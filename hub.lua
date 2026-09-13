@@ -1,6 +1,6 @@
 --=========================================================
--- 🐭 RAT HUB v17.1
--- X 버튼 연결 수정
+-- 🐭 RAT HUB v17
+-- Wallbang 수정 (Raycast 인자 순서 교정: args[3] = params)
 --=========================================================
 local Players      = game:GetService("Players")
 local TweenService = game:GetService("TweenService")
@@ -70,7 +70,7 @@ track(RunService.RenderStepped:Connect(function()
 end))
 
 --=========================================================
--- WALLBANG
+-- ★ WALLBANG (수정판)
 --=========================================================
 local wallbangOK = false
 local originalNamecall = nil
@@ -81,6 +81,7 @@ if hookmetamethod and newcclosure and getnamecallmethod then
         originalNamecall = hookmetamethod(game, "__namecall", newcclosure(function(self, ...)
             local method = getnamecallmethod()
             if Wallbang.Enabled then
+                -- ★ 최신 Raycast: (origin, direction, params) → args[3]이 params
                 if method == "Raycast" then
                     local args = {...}
                     local params = args[3]
@@ -93,10 +94,16 @@ if hookmetamethod and newcclosure and getnamecallmethod then
                         args[3] = np
                     end
                     return originalNamecall(self, unpackFn(args))
+
+                -- ★ 구버전: FindPartOnRayWithIgnoreList(ray, ignoreList)
                 elseif method == "FindPartOnRayWithIgnoreList" then
                     local args = {...}
-                    if typeof(args[2]) == "table" then args[2] = {} end
+                    if typeof(args[2]) == "table" then
+                        args[2] = {}
+                    end
                     return originalNamecall(self, unpackFn(args))
+
+                -- ★ 구버전: FindPartOnRay(ray, ignoreDescendant)
                 elseif method == "FindPartOnRay" then
                     local args = {...}
                     args[2] = nil
@@ -531,10 +538,6 @@ local function createPanel(cfg)
     local function toggle()
         if isOpen then close() else open() end
     end
-
-    track(closeBtn.MouseButton1Click:Connect(function()
-        close()
-    end))
 
     return {
         frame = frame, pages = pages, selectTab = selectTab,
